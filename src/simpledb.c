@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <string.h>
 #include <elftool.h>
+#include <errno.h>
 
 #define N 200
 #define COMMAND_BUFFER_SIZE 100
@@ -18,10 +19,13 @@ enum state { DB_INIT = 1, DB_LOADED=2, DB_RUNNING=4};
 struct break_point {
     void *addr;
     struct break_point *next;
+    int num;
+    long inst;
 };
 
 struct break_point bps[BP_COUNT];
 struct break_point *act_bp, *idle_bp;
+int bps_counter = BP_COUNT;
 
 extern char **environ;
 enum state dbstate = DB_INIT;
@@ -87,9 +91,17 @@ int main(int argc, char**argv) {
                 continue;
             }
             goto INVALID;
-        } else if (strncmp(arg[0], "run", 3)==0 || strncmp(arg[0],"r",1) ==0) {
+        } else if ((strncmp(arg[0], "cont", 5)==0 || strncmp(arg[0],"c",2) ==0) && checkS(DB_RUNNING)) {
             ptrace(PTRACE_CONT,pid,NULL,NULL);
-            wait(NULL);
+            int status;
+            wait(&status);
+            // check state
+            if (WIFEXITED(status)) {
+                printf("Process %d end\n", pid);
+                dbstate = DB_LOADED;
+            } else if (WIFSTOPPED(status)) {
+                puts("Stoped by signal");
+            }
         } else if (strncmp(arg[0], "counti", 6) ==0) {
             int count = 0;
             int status;
@@ -99,15 +111,17 @@ int main(int argc, char**argv) {
                     break;
                 }
                 count++;
-
                 wait(&status);
                 if (WIFEXITED(status)) {
                     break;
                 }
+                if (count < 100) {
+                    print_eip(pid);
+                }
             }
             printf("run %d instructions\n", count);
             dbstate = DB_LOADED;
-        } else if (strncmp(arg[0], "start", 5) ==0 && checkS(DB_LOADED)) {
+        } else if ((strncmp(arg[0], "run", 3)==0 || strncmp(arg[0],"r",1) ==0) && checkS(DB_LOADED)) {
             pid = fork();
             if (pid) {
                 dbstate = DB_RUNNING;
@@ -141,20 +155,34 @@ int main(int argc, char**argv) {
             }
             void *addr;
             int ret = sscanf(arg[1], "%p",&addr);
+            // Check inst
             if (ret < 1 || addr == NULL) {
                 puts("Addr is invalid");
                 continue;
             }
+            errno = 0;
+            long inst = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
+            if (errno) {
+                puts("Addr is invalid");
+                continue;
+            }
+            // Check bp
             if (idle_bp == NULL) {
                 puts("Out of break points\n");
                 continue;
             }
+            printf("data is %llx\n", inst);
+            long trap_inst;
+            trap_inst = inst >> 16 << 16;
+            printf("data is %llx\n", trap_inst);
+            trap_inst |= 0xcc;
+            printf("data is %llx\n", trap_inst);
+
             struct break_point *new = idle_bp, *cur;
             idle_bp = idle_bp->next;
             new->addr = addr;
             new->next = NULL;
-
-            printf("act: %p idle: %p\n", act_bp, idle_bp);
+            new->inst = inst;
 
             if (act_bp == NULL) {
                 act_bp = new;
@@ -176,7 +204,7 @@ int main(int argc, char**argv) {
                 struct break_point *cur = act_bp;
                 int i = 0;
                 while(cur) {
-                    printf("Break point #%d: %p\n", i, cur->addr);
+                    printf("Break point #%d: %p\n", cur->num, cur->addr);
                     cur = cur->next;
                     i++;
                 }
@@ -218,9 +246,11 @@ void init() {
     struct break_point *cur = idle_bp;
     for (int i = 1; i < BP_COUNT; i++) {
         cur->next = &bps[i];
+        cur->num = i;
         cur = cur->next;
     }
     cur->next = NULL;
+    cur->num = BP_COUNT;
 }
 
 int parse_input(char *cmd, char **arg, int *arg_count) {
@@ -255,7 +285,10 @@ elf_handle_t * open_elf(char *elf) {
 }
 void print_eip(pid_t pid) {
     struct user_regs_struct regs;
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
+        puts("Error\n");
+        return ;
+    }
     printf(" @0x%llx", regs.rip);
 }
 
