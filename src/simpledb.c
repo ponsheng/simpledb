@@ -8,15 +8,20 @@
 #include <string.h>
 #include <elftool.h>
 
+#define N 200
+#define COMMAND_BUFFER_SIZE 100
+#define ARG_LIMIT 5
+#define BP_COUNT 10
+
 enum state { DB_INIT = 1, DB_LOADED=2, DB_RUNNING=4};
 
 struct break_point {
     void *addr;
-    int used;
+    struct break_point *next;
 };
 
-struct break_point bps[10];
-int bpcount=0;
+struct break_point bps[BP_COUNT];
+struct break_point *act_bp, *idle_bp;
 
 extern char **environ;
 enum state dbstate = DB_INIT;
@@ -28,18 +33,17 @@ int checkS(enum state s) {
     return 0;
 }
 
+void init();
 int parse_input(char *cmd, char **arg, int *arg_count);
 elf_handle_t *open_elf(char *elf_name);
 void print_eip(pid_t pid);
 void print_elf(char *elf, elf_handle_t *eh);
 void print_help();
 
-#define N 200
-#define COMMAND_BUFFER_SIZE 100
-#define ARG_LIMIT 5
 
 int main(int argc, char**argv) {
 
+    init();
     char *elf_name;
     char cmd[COMMAND_BUFFER_SIZE];
     char *arg[ARG_LIMIT];
@@ -129,37 +133,52 @@ int main(int argc, char**argv) {
                 }
                 fclose(f);
             }
-
+        // Break
         } else if ((strncmp(arg[0], "break", 5) ==0 || arg[0][0] == 'b') && checkS(DB_RUNNING | DB_LOADED)) {
             if (arg_count < 2) {
                 puts("No argrument");
                 continue;
             }
             void *addr;
-            int ret = sscanf(arg[1], "0x%p",&addr);
-            if (ret < 1) {
-                puts("Addr should be 0x_____");
+            int ret = sscanf(arg[1], "%p",&addr);
+            if (ret < 1 || addr == NULL) {
+                puts("Addr is invalid");
                 continue;
             }
-            for (int i = 0; i < bpcount+1; i++) {
-                if (bps[i].used == 0) {
-                    bps[i].used = 1;
-                    bps[i].addr = addr;
-                    bpcount++;
+            if (idle_bp == NULL) {
+                puts("Out of break points\n");
+                continue;
+            }
+            struct break_point *new = idle_bp, *cur;
+            idle_bp = idle_bp->next;
+            new->addr = addr;
+            new->next = NULL;
+
+            printf("act: %p idle: %p\n", act_bp, idle_bp);
+
+            if (act_bp == NULL) {
+                act_bp = new;
+                continue;
+            }
+            cur = act_bp;
+            while(cur) {
+                if (cur->next == NULL) {
+                    cur->next = new;
                     break;
                 }
+                cur = cur->next;
             }
-
+        // list
         } else if (strncmp(arg[0], "list", 4) ==0 || arg[0][0] == 'l') {
-            if (bpcount==0) {
+            if (act_bp == NULL) {
                 puts("No break point set");
             } else {
-                int cur = 0;
-                for (int i = 0; i < bpcount; i++,cur++) {
-                    if (bps[cur].used != 1) {
-                        cur++;
-                    }
-                    printf("Break point #%d: 0x%p\n", cur, bps[cur].addr);
+                struct break_point *cur = act_bp;
+                int i = 0;
+                while(cur) {
+                    printf("Break point #%d: %p\n", i, cur->addr);
+                    cur = cur->next;
+                    i++;
                 }
             }
         } else if (strncmp(arg[0], "help", 4) ==0 || arg[0][0] == 'h') {
@@ -192,7 +211,17 @@ INVALID:
     return 0;
 }
 
-
+void init() {
+    // init break point
+    act_bp = NULL;
+    idle_bp = &bps[0];
+    struct break_point *cur = idle_bp;
+    for (int i = 1; i < BP_COUNT; i++) {
+        cur->next = &bps[i];
+        cur = cur->next;
+    }
+    cur->next = NULL;
+}
 
 int parse_input(char *cmd, char **arg, int *arg_count) {
     // delete new line
