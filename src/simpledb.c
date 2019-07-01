@@ -32,7 +32,7 @@ void print_elf(char *elf, elf_handle_t *eh) {
     }
     elf_shdr_t text_section = eh->shdr[i];
     printf("program '%s' loaded. Entry point 0x%lx. [TEXT] vaddr:0x%llx, offset:0x%llx, size:0x%llx\n", elf, eh->entrypoint, text_section.addr,  text_section.offset, text_section.size);
-    elf_close(eh); 
+    elf_close(eh);
 }
 
 int checkS(enum state s) {
@@ -40,7 +40,7 @@ int checkS(enum state s) {
         return 1;
     }
     return 0;
-} 
+}
 
 int parse_input(char *cmd, char **arg, int *arg_count);
 elf_handle_t *open_elf(char *elf_name);
@@ -81,15 +81,14 @@ int main(int argc, char**argv) {
         }
         printf("> ");
         fflush(stdout);
-        char *eof = fgets(cmd, COMMAND_BUFFER_SIZE, stdin);
-        if (!eof) {
+        if (! fgets(cmd, COMMAND_BUFFER_SIZE, stdin)) {
             goto EXIT;
         }
         int ret = parse_input(cmd, arg, &arg_count);
         if (ret) {
             continue;
         }
-       
+        // Switch cmd
         if (strncmp(arg[0], "load", 4)==0) {
             if (dbstate == DB_INIT) {
                 eh = open_elf(elf_name = arg[1]);
