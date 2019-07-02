@@ -40,7 +40,8 @@ int checkS(enum state s) {
 void init();
 int parse_input(char *cmd, char **arg, int *arg_count);
 elf_handle_t *open_elf(char *elf_name);
-void print_eip(pid_t pid);
+void print_rip(pid_t pid);
+void *get_rip(pid_t pid);
 void print_elf(char *elf, elf_handle_t *eh);
 void print_help();
 
@@ -72,7 +73,7 @@ int main(int argc, char**argv) {
                 break;
             case DB_RUNNING:
                 printf("[RUNNING]");
-                print_eip(pid);
+                print_rip(pid);
                 break;
         }
         printf("> ");
@@ -100,7 +101,20 @@ int main(int argc, char**argv) {
                 printf("Process %d end\n", pid);
                 dbstate = DB_LOADED;
             } else if (WIFSTOPPED(status)) {
-                puts("Stoped by signal");
+                // Stopped by break point
+                struct break_point *cur = act_bp;
+                void *addr = get_rip(pid)-1;
+                while (cur) {
+                    if (cur->addr == addr) {
+                        printf("BP #%d hit", cur->num);
+                        break;
+                    }
+                    cur = cur->next;
+                }
+                if (ptrace(PTRACE_POKETEXT, pid, addr, cur->inst) < 0) {
+                    puts("error");
+                    continue;
+                }
             }
         } else if (strncmp(arg[0], "counti", 6) ==0) {
             int count = 0;
@@ -114,9 +128,6 @@ int main(int argc, char**argv) {
                 wait(&status);
                 if (WIFEXITED(status)) {
                     break;
-                }
-                if (count < 100) {
-                    print_eip(pid);
                 }
             }
             printf("run %d instructions\n", count);
@@ -171,13 +182,13 @@ int main(int argc, char**argv) {
                 puts("Out of break points\n");
                 continue;
             }
-            printf("data is %llx\n", inst);
             long trap_inst;
             trap_inst = inst >> 16 << 16;
-            printf("data is %llx\n", trap_inst);
             trap_inst |= 0xcc;
-            printf("data is %llx\n", trap_inst);
-
+            if (ptrace(PTRACE_POKETEXT, pid, addr, trap_inst) < 0) {
+                puts("error");
+                continue;
+            }
             struct break_point *new = idle_bp, *cur;
             idle_bp = idle_bp->next;
             new->addr = addr;
@@ -283,13 +294,21 @@ elf_handle_t * open_elf(char *elf) {
     }
     return eh;
 }
-void print_eip(pid_t pid) {
+void print_rip(pid_t pid) {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
         puts("Error\n");
         return ;
     }
     printf(" @0x%llx", regs.rip);
+}
+void *get_rip(pid_t pid) {
+    struct user_regs_struct regs;
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
+        puts("Error\n");
+        return 0;
+    }
+    return (void*)regs.rip;
 }
 
 void print_elf(char *elf, elf_handle_t *eh) {
