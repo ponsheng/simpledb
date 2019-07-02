@@ -26,6 +26,7 @@ struct break_point {
 struct break_point bps[BP_COUNT];
 struct break_point *act_bp, *idle_bp;
 int bps_counter = BP_COUNT;
+pid_t pid, ppid;
 
 extern char **environ;
 enum state dbstate = DB_INIT;
@@ -55,7 +56,6 @@ int main(int argc, char**argv) {
     int arg_count;
     char buf[N];
     elf_handle_t *eh = NULL;
-    pid_t pid, ppid;
 
     elf_init();
     ppid = getpid();
@@ -86,13 +86,16 @@ int main(int argc, char**argv) {
             continue;
         }
         // Switch cmd
-        if (strncmp(arg[0], "load", 4)==0) {
+        if (strncmp(arg[0], "load", 5)==0) {
             if (dbstate == DB_INIT) {
                 eh = open_elf(elf_name = arg[1]);
                 continue;
             }
             goto INVALID;
-        } else if ((strncmp(arg[0], "cont", 5)==0 || strncmp(arg[0],"c",2) ==0) && checkS(DB_RUNNING)) {
+        } else if (strncmp(arg[0], "cont", 5)==0 || strncmp(arg[0],"c",2) ==0) {
+            if (!checkS(DB_RUNNING)) {
+                goto INVALID;
+            }
             ptrace(PTRACE_CONT,pid,NULL,NULL);
             int status;
             wait(&status);
@@ -116,7 +119,10 @@ int main(int argc, char**argv) {
                     continue;
                 }
             }
-        } else if (strncmp(arg[0], "counti", 6) ==0) {
+        } else if (strncmp(arg[0], "counti", 7) ==0) {
+            if (!checkS(DB_RUNNING)) {
+                goto INVALID;
+            }
             int count = 0;
             int status;
             while (1) {
@@ -132,7 +138,10 @@ int main(int argc, char**argv) {
             }
             printf("run %d instructions\n", count);
             dbstate = DB_LOADED;
-        } else if ((strncmp(arg[0], "run", 3)==0 || strncmp(arg[0],"r",1) ==0) && checkS(DB_LOADED)) {
+        } else if (strncmp(arg[0], "run", 4)==0 || strncmp(arg[0],"r",2) ==0) {
+            if (!checkS(DB_LOADED)) {
+                goto INVALID;
+            }
             pid = fork();
             if (pid) {
                 dbstate = DB_RUNNING;
@@ -142,7 +151,7 @@ int main(int argc, char**argv) {
                 ptrace(PTRACE_TRACEME,0,NULL,NULL);
                 execve(elf_name,argv, environ);
             }
-        } else if (strncmp(arg[0], "vmmap", 5) ==0 || arg[0][0] == 'm') {
+        } else if (strncmp(arg[0], "vmmap", 6) ==0 || strncmp(arg[0],"m",2) ==0) {
             if (dbstate == DB_LOADED) {
                 // TODO
             } else if (dbstate == DB_RUNNING) {
@@ -157,9 +166,14 @@ int main(int argc, char**argv) {
                     printf("%s", buf);
                 }
                 fclose(f);
+            } else {
+                goto INVALID;
             }
         // Break
-        } else if ((strncmp(arg[0], "break", 5) ==0 || arg[0][0] == 'b') && checkS(DB_RUNNING | DB_LOADED)) {
+        } else if (strncmp(arg[0], "break", 6) ==0 || strncmp(arg[0],"b",2) ==0) {
+            if (!checkS(DB_RUNNING | DB_LOADED)) {
+                goto INVALID;
+            }
             if (arg_count < 2) {
                 puts("No argrument");
                 continue;
@@ -194,6 +208,7 @@ int main(int argc, char**argv) {
             new->addr = addr;
             new->next = NULL;
             new->inst = inst;
+            printf("Set break point #%d: %p\n", new->num, new->addr);
 
             if (act_bp == NULL) {
                 act_bp = new;
@@ -208,7 +223,7 @@ int main(int argc, char**argv) {
                 cur = cur->next;
             }
         // list
-        } else if (strncmp(arg[0], "list", 4) ==0 || arg[0][0] == 'l') {
+        } else if (strncmp(arg[0], "list", 5) ==0 || strncmp(arg[0],"l",2) ==0) {
             if (act_bp == NULL) {
                 puts("No break point set");
             } else {
@@ -220,17 +235,17 @@ int main(int argc, char**argv) {
                     i++;
                 }
             }
-        } else if (strncmp(arg[0], "help", 4) ==0 || arg[0][0] == 'h') {
+        } else if (strncmp(arg[0], "help", 5) ==0 || strncmp(arg[0],"h",2) ==0) {
 			print_help();
 
-        } else if (strncmp(arg[0], "si", 2)==0 && checkS(DB_RUNNING)) {
+        } else if (strncmp(arg[0], "si", 3)==0 && checkS(DB_RUNNING)) {
             if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) < 0) {
                 puts("error");
                 break;
             }
             wait(NULL);
 
-        } else if (strncmp(arg[0], "exit", 4)==0) {
+        } else if (strncmp(arg[0], "exit", 5)==0) {
 EXIT:
             if (dbstate == DB_RUNNING) {
                 if (kill(pid,9)) {
