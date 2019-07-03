@@ -1,4 +1,4 @@
-obj=hello 
+obj=hello loop
 
 all:  $(obj)
 

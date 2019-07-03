@@ -24,7 +24,7 @@ struct break_point {
 };
 
 struct break_point bps[BP_COUNT];
-struct break_point *act_bp, *idle_bp;
+struct break_point *act_bp, *idle_bp, *todo_bp;
 int bps_counter = BP_COUNT;
 pid_t pid, ppid;
 
@@ -44,7 +44,10 @@ elf_handle_t *open_elf(char *elf_name);
 void print_rip(pid_t pid);
 void *get_rip(pid_t pid);
 void print_elf(char *elf, elf_handle_t *eh);
+int wait_process(int single);
 void print_help();
+int set_bp(struct break_point*, void*addr);
+struct break_point *getBP(void *addr);
 
 
 int main(int argc, char**argv) {
@@ -87,38 +90,33 @@ int main(int argc, char**argv) {
         }
         // Switch cmd
         if (strncmp(arg[0], "load", 5)==0) {
-            if (dbstate == DB_INIT) {
-                eh = open_elf(elf_name = arg[1]);
-                continue;
+            if (dbstate != DB_INIT) {
+                goto INVALID;
             }
-            goto INVALID;
+            eh = open_elf(elf_name = arg[1]);
+            dbstate = DB_LOADED;
+        // cont
         } else if (strncmp(arg[0], "cont", 5)==0 || strncmp(arg[0],"c",2) ==0) {
             if (!checkS(DB_RUNNING)) {
                 goto INVALID;
             }
-            ptrace(PTRACE_CONT,pid,NULL,NULL);
-            int status;
-            wait(&status);
-            // check state
-            if (WIFEXITED(status)) {
-                printf("Process %d end\n", pid);
-                dbstate = DB_LOADED;
-            } else if (WIFSTOPPED(status)) {
-                // Stopped by break point
-                struct break_point *cur = act_bp;
-                void *addr = get_rip(pid)-1;
-                while (cur) {
-                    if (cur->addr == addr) {
-                        printf("BP #%d hit", cur->num);
-                        break;
-                    }
-                    cur = cur->next;
+            // Check todo list
+            if (todo_bp) {
+                // single
+                if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL)) {
+                    puts("Error PTRACE_SINGLESTEP");
+                    break;
                 }
-                if (ptrace(PTRACE_POKETEXT, pid, addr, cur->inst) < 0) {
-                    puts("error");
+                // Next instr touch break point
+                if (wait_process(1)) {
                     continue;
                 }
             }
+
+            ptrace(PTRACE_CONT,pid,NULL,NULL);
+            wait_process(0);
+
+        // TO BE REMOVE
         } else if (strncmp(arg[0], "counti", 7) ==0) {
             if (!checkS(DB_RUNNING)) {
                 goto INVALID;
@@ -126,8 +124,8 @@ int main(int argc, char**argv) {
             int count = 0;
             int status;
             while (1) {
-                if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) < 0) {
-                    puts("error");
+                if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL)) {
+                    puts("Error PTRACE_SINGLESTEP");
                     break;
                 }
                 count++;
@@ -171,7 +169,7 @@ int main(int argc, char**argv) {
             }
         // Break
         } else if (strncmp(arg[0], "break", 6) ==0 || strncmp(arg[0],"b",2) ==0) {
-            if (!checkS(DB_RUNNING | DB_LOADED)) {
+            if (checkS(DB_INIT | DB_LOADED)) {
                 goto INVALID;
             }
             if (arg_count < 2) {
@@ -185,29 +183,17 @@ int main(int argc, char**argv) {
                 puts("Addr is invalid");
                 continue;
             }
-            errno = 0;
-            long inst = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
-            if (errno) {
-                puts("Addr is invalid");
-                continue;
-            }
             // Check bp
             if (idle_bp == NULL) {
                 puts("Out of break points\n");
                 continue;
             }
-            long trap_inst;
-            trap_inst = inst >> 16 << 16;
-            trap_inst |= 0xcc;
-            if (ptrace(PTRACE_POKETEXT, pid, addr, trap_inst) < 0) {
-                puts("error");
-                continue;
-            }
+
             struct break_point *new = idle_bp, *cur;
             idle_bp = idle_bp->next;
-            new->addr = addr;
-            new->next = NULL;
-            new->inst = inst;
+            if (set_bp(new, addr)) {
+                continue;
+            }
             printf("Set break point #%d: %p\n", new->num, new->addr);
 
             if (act_bp == NULL) {
@@ -239,12 +225,12 @@ int main(int argc, char**argv) {
 			print_help();
 
         } else if (strncmp(arg[0], "si", 3)==0 && checkS(DB_RUNNING)) {
-            if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) < 0) {
-                puts("error");
+            if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL)) {
+                puts("Error PTRACE_SINGLESTEP");
                 break;
             }
-            wait(NULL);
-
+            wait_process(1);
+            // Check todo list
         } else if (strncmp(arg[0], "exit", 5)==0) {
 EXIT:
             if (dbstate == DB_RUNNING) {
@@ -253,21 +239,22 @@ EXIT:
                 } else {
                     puts("Kill successfully");
                 }
-            } else {
-                puts("");
             }
-            break;
+            puts("Exit");
+            return 0;
         } else {
 INVALID:
         printf("'%s' is a invalid command\n", arg[0]);
         }
     }
+    puts("Exit");
     return 0;
 }
 
 void init() {
     // init break point
     act_bp = NULL;
+    todo_bp = NULL;
     idle_bp = &bps[0];
     struct break_point *cur = idle_bp;
     for (int i = 1; i < BP_COUNT; i++) {
@@ -312,7 +299,7 @@ elf_handle_t * open_elf(char *elf) {
 void print_rip(pid_t pid) {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
-        puts("Error\n");
+        puts("Error PTRACE_GETREGS\n");
         return ;
     }
     printf(" @0x%llx", regs.rip);
@@ -320,7 +307,7 @@ void print_rip(pid_t pid) {
 void *get_rip(pid_t pid) {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
-        puts("Error\n");
+        puts("Error PTRACE_GETREGS\n");
         return 0;
     }
     return (void*)regs.rip;
@@ -357,7 +344,7 @@ char *help_meg = "\
     load {path/to/a/program}: load a elf\n\
 \n\
 <Loaded>\n\
-    start: start the program and stop at the first instruction\n\
+    run (r) : run the program\n\
 \n\
 <Running>\n\
     dump (x) addr [length]: dump memory content\n\
@@ -365,11 +352,10 @@ char *help_meg = "\
     getregs: show registers\n\
     set (s) reg val: get a single value to a register\n\
     si: step into instruction\n\
+    break (b) {instruction-address}: add a break point\n\
 \n\
 <Loaded or Running>\n\
     disasm (d) addr: disassemble instructions in a file or a memory region\n\
-    break (b) {instruction-address}: add a break point\n\
-    run (r) : run the program\n\
     vmmap (m) : show memory layout\n\
 \n\
 <Any>\n\
@@ -379,4 +365,92 @@ char *help_meg = "\
     exit (q) : terminate the debugger\n\
 ";
 	puts(help_meg);
+}
+
+// if single mode touch break point, return 1
+int wait_process(int single_mode) {
+    int status;
+    wait(&status);
+    // check state
+
+    if (WIFEXITED(status)) {
+        printf("Process %d end\n", pid);
+        dbstate = DB_LOADED;
+        return 0;
+    } else if (WIFSTOPPED(status) && single_mode) {
+        if (todo_bp) {
+            set_bp(todo_bp, NULL);
+            todo_bp = NULL;
+        }
+        // check next instr if is break
+        void *addr = get_rip(pid);
+        // TODO
+    } else if (WIFSTOPPED(status)) {
+        // Stopped by break point
+        struct break_point *cur = act_bp;
+        void *addr = get_rip(pid)-1;
+        if (!(cur = getBP(addr))) {
+            puts("SIGTRAP?");
+            return 0;
+        }
+        // restore inst
+        if (ptrace(PTRACE_POKETEXT, pid, addr, cur->inst) < 0) {
+            puts("Error POKETEXT");
+            return 0;
+        }
+        // put into todolist
+        if (todo_bp) {
+            puts("todo_bp is not empty");
+            return 0;
+        }
+        todo_bp = cur;
+        struct user_regs_struct regs;
+        if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
+            puts("Error getregs");
+            return 0;
+        }
+        regs.rip = (long long) addr;
+        // restore rip
+        if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) < 0) {
+            puts("Error setregs");
+            return 0;
+        }
+    } else {
+        puts("Unknown wait result");
+    }
+    return 0;
+}
+
+int set_bp(struct break_point *bp, void *addr) {
+    long inst, trap_inst;
+    if (addr) {
+        errno = 0;
+        inst = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
+        if (errno) {
+            puts("Addr is invalid");
+            return 1;
+        }
+        bp->addr = addr;
+        bp->inst = inst;
+        bp->next = NULL;
+    }
+    trap_inst = bp->inst >> 16 << 16;
+    trap_inst |= 0xcc;
+    if (ptrace(PTRACE_POKETEXT, pid, bp->addr, trap_inst)) {
+        puts("error");
+        return 1;
+    }
+    return 0;
+}
+
+struct break_point *getBP(void *addr) {
+    struct break_point *cur = act_bp;
+    while (cur) {
+        if (cur->addr == addr) {
+            printf("Break Point #%d hit\n", cur->num);
+            break;
+        }
+        cur = cur->next;
+    }
+    return cur;
 }
