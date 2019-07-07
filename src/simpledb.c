@@ -14,6 +14,14 @@
 #define ARG_LIMIT 5
 #define BP_COUNT 10
 
+#define DEBUG
+
+#ifdef DEBUG
+#define DP(...) printf("[DEBUG] "__VA_ARGS__);
+#else
+#define DP(...)
+#endif
+
 enum state { DB_INIT = 1, DB_LOADED=2, DB_RUNNING=4};
 
 struct break_point {
@@ -41,13 +49,14 @@ int checkS(enum state s) {
 void init();
 int parse_input(char *cmd, char **arg, int *arg_count);
 elf_handle_t *open_elf(char *elf_name);
-void print_rip(pid_t pid);
-void *get_rip(pid_t pid);
+void print_rip();
+void *get_rip();
 void print_elf(char *elf, elf_handle_t *eh);
-int wait_process(int single);
+int wait_process(int single_step, struct break_point **hitBP);
 void print_help();
-int set_bp(struct break_point*, void*addr);
-struct break_point *getBP(void *addr);
+int setBP(struct break_point*, void*addr);
+int unsetBP(struct break_point *bp);
+struct break_point *lookupBP(void *addr);
 
 
 int main(int argc, char**argv) {
@@ -76,7 +85,7 @@ int main(int argc, char**argv) {
                 break;
             case DB_RUNNING:
                 printf("[RUNNING]");
-                print_rip(pid);
+                print_rip();
                 break;
         }
         printf("> ");
@@ -102,19 +111,27 @@ int main(int argc, char**argv) {
             }
             // Check todo list
             if (todo_bp) {
+                DP("There is todo bp\n");
                 // single
                 if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL)) {
                     puts("Error PTRACE_SINGLESTEP");
                     break;
                 }
                 // Next instr touch break point
-                if (wait_process(1)) {
+                struct break_point *hitBP = NULL;
+                wait_process(1, &hitBP);
+
+                if (hitBP) {
                     continue;
                 }
             }
+            DP("Continue\n");
 
-            ptrace(PTRACE_CONT,pid,NULL,NULL);
-            wait_process(0);
+            if (ptrace(PTRACE_CONT,pid,NULL,NULL)) {
+                printf("Error PTRACE_CONT %s\n", __LINE__);
+                continue;
+            }
+            wait_process(0, NULL);
 
         // TO BE REMOVE
         } else if (strncmp(arg[0], "counti", 7) ==0) {
@@ -150,9 +167,7 @@ int main(int argc, char**argv) {
                 execve(elf_name,argv, environ);
             }
         } else if (strncmp(arg[0], "vmmap", 6) ==0 || strncmp(arg[0],"m",2) ==0) {
-            if (dbstate == DB_LOADED) {
-                // TODO
-            } else if (dbstate == DB_RUNNING) {
+            if (dbstate == DB_RUNNING) {
                 char file_name[100];
                 sprintf(file_name, "/proc/%d/maps", pid);
                 FILE *f = fopen(file_name, "r");
@@ -188,12 +203,26 @@ int main(int argc, char**argv) {
                 puts("Out of break points\n");
                 continue;
             }
-
-            struct break_point *new = idle_bp, *cur;
-            idle_bp = idle_bp->next;
-            if (set_bp(new, addr)) {
+            // check if addr overlap
+            struct break_point *cur = act_bp;
+            while (cur) {
+                if (cur->addr == addr) {
+                    break;
+                }
+                cur = cur->next;
+            }
+            if (cur) {
+                printf("Addr %p have register as break point #%d\n", addr, cur->num);
                 continue;
             }
+
+            struct break_point *new = idle_bp;
+            if (setBP(new, addr)) {
+                printf("Failed to set Break Point\n");
+                continue;
+            }
+            idle_bp = idle_bp->next;
+            new->next = NULL;
             printf("Set break point #%d: %p\n", new->num, new->addr);
 
             if (act_bp == NULL) {
@@ -207,6 +236,15 @@ int main(int argc, char**argv) {
                     break;
                 }
                 cur = cur->next;
+            }
+
+            // check if addr eq rip
+            if (addr == get_rip()) {
+                unsetBP(new);
+                if (todo_bp) {
+                    DP("todo list is not empty");
+                }
+                todo_bp = new;
             }
         // list
         } else if (strncmp(arg[0], "list", 5) ==0 || strncmp(arg[0],"l",2) ==0) {
@@ -229,7 +267,9 @@ int main(int argc, char**argv) {
                 puts("Error PTRACE_SINGLESTEP");
                 break;
             }
-            wait_process(1);
+            struct break_point *hitBP = NULL;
+            wait_process(1, &hitBP);
+
             // Check todo list
         } else if (strncmp(arg[0], "exit", 5)==0) {
 EXIT:
@@ -296,7 +336,7 @@ elf_handle_t * open_elf(char *elf) {
     }
     return eh;
 }
-void print_rip(pid_t pid) {
+void print_rip() {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
         puts("Error PTRACE_GETREGS\n");
@@ -304,7 +344,7 @@ void print_rip(pid_t pid) {
     }
     printf(" @0x%llx", regs.rip);
 }
-void *get_rip(pid_t pid) {
+void *get_rip() {
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
         puts("Error PTRACE_GETREGS\n");
@@ -353,10 +393,10 @@ char *help_meg = "\
     set (s) reg val: get a single value to a register\n\
     si: step into instruction\n\
     break (b) {instruction-address}: add a break point\n\
+    vmmap (m) : show memory layout\n\
 \n\
 <Loaded or Running>\n\
     disasm (d) addr: disassemble instructions in a file or a memory region\n\
-    vmmap (m) : show memory layout\n\
 \n\
 <Any>\n\
     help (h) : show this message\n\
@@ -367,8 +407,7 @@ char *help_meg = "\
 	puts(help_meg);
 }
 
-// if single mode touch break point, return 1
-int wait_process(int single_mode) {
+int wait_process(int single_mode, struct break_point **hitBP) {
     int status;
     wait(&status);
     // check state
@@ -378,42 +417,66 @@ int wait_process(int single_mode) {
         dbstate = DB_LOADED;
         return 0;
     } else if (WIFSTOPPED(status) && single_mode) {
+        if (!hitBP) {
+            DP("Error %s\n", __LINE__);
+        }
+        void *addr = get_rip();
         if (todo_bp) {
-            set_bp(todo_bp, NULL);
+            //if (lookupBP(todo_bp)->addr != addr) {
+
+            setBP(todo_bp, NULL);
             todo_bp = NULL;
         }
         // check next instr if is break
-        void *addr = get_rip(pid);
+        errno = 0;
+        long inst = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
+        if (errno) {
+            puts("Addr is invalid");
+            return 1;
+        }
+        if ((0xff & inst) == 0xcc) {
+            DP("Next inst is bp\n");
+            struct break_point *bp;
+            if (bp = lookupBP(addr)) {
+                unsetBP(bp);
+                if (todo_bp) {
+                    DP("todo list is not empty");
+                }
+                todo_bp = bp;
+                *hitBP = bp;
+                printf("Break Point #%d hit\n", (*hitBP)->num);
+            }
+        }
         // TODO
     } else if (WIFSTOPPED(status)) {
         // Stopped by break point
-        struct break_point *cur = act_bp;
-        void *addr = get_rip(pid)-1;
-        if (!(cur = getBP(addr))) {
+        struct break_point *cur;
+        void *addr = get_rip()-1;
+        if (!(cur = lookupBP(addr))) {
             puts("SIGTRAP?");
-            return 0;
+            return 1;
         }
+        printf("Break Point #%d hit\n", cur->num);
         // restore inst
-        if (ptrace(PTRACE_POKETEXT, pid, addr, cur->inst) < 0) {
-            puts("Error POKETEXT");
-            return 0;
+        if (unsetBP(cur)) {
+            return 1;
         }
         // put into todolist
         if (todo_bp) {
             puts("todo_bp is not empty");
-            return 0;
+            return 1;
         }
         todo_bp = cur;
+        // restore rip
         struct user_regs_struct regs;
         if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
             puts("Error getregs");
-            return 0;
+            return 1;
         }
         regs.rip = (long long) addr;
-        // restore rip
         if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) < 0) {
             puts("Error setregs");
-            return 0;
+            return 1;
         }
     } else {
         puts("Unknown wait result");
@@ -421,20 +484,25 @@ int wait_process(int single_mode) {
     return 0;
 }
 
-int set_bp(struct break_point *bp, void *addr) {
+int setBP(struct break_point *bp, void *addr) {
     long inst, trap_inst;
+
+    errno = 0;
     if (addr) {
-        errno = 0;
-        inst = ptrace(PTRACE_PEEKTEXT, pid, addr, NULL);
-        if (errno) {
-            puts("Addr is invalid");
-            return 1;
-        }
         bp->addr = addr;
-        bp->inst = inst;
-        bp->next = NULL;
     }
-    trap_inst = bp->inst >> 16 << 16;
+    DP("Set break_point #%d : %p\n", bp->num, bp->addr);
+
+    inst = ptrace(PTRACE_PEEKTEXT, pid, bp->addr, NULL);
+    if (errno) {
+        puts("Error Addr is invalid");
+        return 1;
+    }
+
+    if (addr) {
+        bp->inst = inst & 0xff;
+    }
+    trap_inst = inst >> 8 << 8;
     trap_inst |= 0xcc;
     if (ptrace(PTRACE_POKETEXT, pid, bp->addr, trap_inst)) {
         puts("error");
@@ -443,11 +511,29 @@ int set_bp(struct break_point *bp, void *addr) {
     return 0;
 }
 
-struct break_point *getBP(void *addr) {
+int unsetBP(struct break_point *bp) {
+    DP("Unset break_point #%d : %p\n", bp->num, bp->addr);
+    errno = 0;
+    long inst = ptrace(PTRACE_PEEKTEXT, pid, bp->addr, NULL);
+    if (errno) {
+        puts("Error Addr is invalid");
+        return 1;
+    }
+
+    inst = inst >> 8 << 8;
+    inst |= bp->inst;
+
+    if (ptrace(PTRACE_POKETEXT, pid, bp->addr, inst)) {
+        puts("Error POKETEXT");
+        return 1;
+    }
+    return 0;
+}
+
+struct break_point *lookupBP(void *addr) {
     struct break_point *cur = act_bp;
     while (cur) {
         if (cur->addr == addr) {
-            printf("Break Point #%d hit\n", cur->num);
             break;
         }
         cur = cur->next;
