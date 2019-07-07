@@ -200,7 +200,7 @@ int main(int argc, char**argv) {
             }
             // Check bp
             if (idle_bp == NULL) {
-                puts("Out of break points\n");
+                puts("Out of break points");
                 continue;
             }
             // check if addr overlap
@@ -259,6 +259,47 @@ int main(int argc, char**argv) {
                     i++;
                 }
             }
+        // delete
+        } else if (strncmp(arg[0], "delete", 7) ==0 || strncmp(arg[0],"d",2) ==0) {
+            int id;
+            if (sscanf(arg[1], "%d",&id) < 1) {
+                puts("Invalid break point id\n");
+                continue;
+            }
+            struct break_point *cur = act_bp, *last = NULL, *tmp;
+            while (cur) {
+                if (cur->num == id) {
+                    break;
+                }
+                last = cur;
+                cur = cur->next;
+            }
+            if (!cur) {
+                puts("Invalid break point id");
+                continue;
+            }
+            if (todo_bp == cur) {
+                todo_bp = NULL;
+            }
+            unsetBP(cur);
+            printf("Delete break point #%d\n", cur->num);
+            if (last) {
+                last->next = cur->next;
+            } else {
+                act_bp = cur->next;
+            }
+            cur->num = ++bps_counter;
+            cur->next = NULL;
+            if (idle_bp) {
+                tmp = idle_bp;
+                while (tmp->next) {
+                    tmp = tmp->next;
+                }
+                tmp->next = cur;
+            } else {
+                idle_bp = cur;
+            }
+
         } else if (strncmp(arg[0], "help", 5) ==0 || strncmp(arg[0],"h",2) ==0) {
 			print_help();
 
@@ -401,7 +442,7 @@ char *help_meg = "\
 <Any>\n\
     help (h) : show this message\n\
     list (l) : list break points\n\
-    delete {break-point-id}: remove a break point\n\
+    delete (d) {break-point-id}: remove a break point\n\
     exit (q) : terminate the debugger\n\
 ";
 	puts(help_meg);
@@ -422,8 +463,6 @@ int wait_process(int single_mode, struct break_point **hitBP) {
         }
         void *addr = get_rip();
         if (todo_bp) {
-            //if (lookupBP(todo_bp)->addr != addr) {
-
             setBP(todo_bp, NULL);
             todo_bp = NULL;
         }
@@ -447,7 +486,6 @@ int wait_process(int single_mode, struct break_point **hitBP) {
                 printf("Break Point #%d hit\n", (*hitBP)->num);
             }
         }
-        // TODO
     } else if (WIFSTOPPED(status)) {
         // Stopped by break point
         struct break_point *cur;
