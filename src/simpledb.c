@@ -6,8 +6,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
-#include <elftool.h>
 #include <errno.h>
+
+#include "elftool.h"
+#include "simpledb.h"
 
 #define N 200
 #define COMMAND_BUFFER_SIZE 100
@@ -260,7 +262,7 @@ int main(int argc, char**argv) {
                 }
             }
         // delete
-        } else if (strncmp(arg[0], "delete", 7) ==0 || strncmp(arg[0],"d",2) ==0) {
+        } else if (strncmp(arg[0], "delete", 7) ==0) {
             int id;
             if (sscanf(arg[1], "%d",&id) < 1) {
                 puts("Invalid break point id\n");
@@ -300,6 +302,29 @@ int main(int argc, char**argv) {
                 idle_bp = cur;
             }
 
+        } else if (strncmp(arg[0], "disasm", 7) ==0 || strncmp(arg[0],"d",2) ==0) {
+            if (!checkS(DB_RUNNING)) {
+                goto INVALID;
+            }
+            void *addr = get_rip();
+            int size = 10;
+            long insts[size];
+            int i;
+
+            for (i = 0; i < size; i++) {
+                    errno = 0;
+                    long inst = ptrace(PTRACE_PEEKTEXT, pid, addr+sizeof(long)*i, NULL);
+                    if (errno) {
+                        puts("Error Addr is invalid");
+                        break;
+                    }
+                    insts[i] = inst;
+            }
+            if (i != size) {
+                puts("Error PTRACE_PEEKTEXT");
+                continue;
+            }
+            print_disasm(insts, size, addr);
         } else if (strncmp(arg[0], "help", 5) ==0 || strncmp(arg[0],"h",2) ==0) {
 			print_help();
 
@@ -442,7 +467,7 @@ char *help_meg = "\
 <Any>\n\
     help (h) : show this message\n\
     list (l) : list break points\n\
-    delete (d) {break-point-id}: remove a break point\n\
+    delete {break-point-id}: remove a break point\n\
     exit (q) : terminate the debugger\n\
 ";
 	puts(help_meg);
